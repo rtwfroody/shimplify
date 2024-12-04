@@ -1,5 +1,6 @@
 use std::{collections::HashSet, io::Read};
 
+#[derive(Debug)]
 struct NameIter<'a> {
     text: &'a str,
     attempt: usize,
@@ -18,36 +19,82 @@ impl Iterator for NameIter<'_> {
     type Item = String;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.attempt += 1;
-        match self.attempt {
-            1 => Some(shorten(last_part(self.text).as_str(), |c| c == '-')),
-            2 => Some(shorten(last_part(self.text).as_str(), |c| !c.is_alphanumeric())),
-            3 => Some(last_part(self.text)),
-            4 => Some(shorten(self.text, |c| c == '/')),
-            _ => format!("{}_{}", shorten(self.text, |c| c == '/'), self.attempt - 3).into(),
+        loop {
+            self.attempt += 1;
+            if let Some(name) = match self.attempt {
+                1 => self.text.last_part()
+                    .and_then(|part| part.shorten(|c| c == '-')),
+                2 => self.text.last_part()
+                    .and_then(|part| part.shorten(|c| !c.is_alphanumeric())),
+                3 => self.text.last_part()
+                    .and_then(|part| part.shorten(|c| c == '/')),
+                4 => self.text.last_part(),
+                5 => self.text.shorten(|c| c == '/'),
+                _ => Some(format!("{}_{}", self.text.shorten(|c| c == '/')
+                        .unwrap_or("WTF".to_string()), self.attempt - 3)),
+            } {
+                return Some(name);
+            }
         }
     }
 }
 
-fn shorten<F>(text: &str, separator: F) -> String
-where F: Fn(char) -> bool
-{
-    let mut var_name = String::new();
-    let mut add_char = true;
-    for c in text.chars() {
-        if add_char && c.is_alphanumeric() {
-            var_name.push(c);
-            add_char = false;
-        }
-        if separator(c) {
-            add_char = true;
-        }
+fn legalize(var_name: &str) -> String {
+    let var_name: String = var_name
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    if var_name.chars().next().unwrap().is_numeric() {
+        format!("_{}", var_name)
+    } else {
+        var_name
     }
-    var_name.to_uppercase()
 }
 
-fn last_part(text: &str) -> String {
-    text.split('/').last().unwrap().to_uppercase()
+trait Shorten {
+    fn shorten<F>(&self, separator: F) -> Option<String>
+    where F: Fn(char) -> bool;
+}
+
+impl Shorten for str {
+    fn shorten<F>(&self, separator: F) -> Option<String>
+    where F: Fn(char) -> bool
+    {
+        let mut var_name = String::new();
+        let mut add_char = true;
+        for c in self.chars() {
+            if add_char && c.is_alphanumeric() {
+                var_name.push(c);
+                add_char = false;
+            }
+            if separator(c) {
+                add_char = true;
+            }
+        }
+        if var_name.len() == 0 {
+            None
+        } else {
+            Some(legalize(var_name.as_str()))
+        }
+    }
+}
+
+trait LastPart {
+    fn last_part(&self) -> Option<String>;
+}
+
+impl LastPart for str {
+    fn last_part(&self) -> Option<String> {
+        // Get penultimate and last parts of the path.
+        //println!("text: {}", self);
+        match self.split('/')
+                .filter(|part| !part.is_empty())
+                .last() {
+            Some(part) => Some(legalize(part)),
+            None => None,
+        }
+    }
 }
 
 fn var_name(
@@ -62,23 +109,46 @@ fn var_name(
     panic!("No available variable name found for {}", subpath);
 }
 
+fn split_points(text: &str) -> Vec<usize> {
+    let mut points = vec![0];
+    let mut add_point = false;
+    for (i, c) in text.chars().enumerate() {
+        if add_point && c.is_alphanumeric() {
+            points.push(i);
+            add_point = false;
+        }
+        if !c.is_alphanumeric() {
+            add_point = true;
+        }
+    }
+    points.push(text.len());
+    points
+}
+
 fn build_savings_table(used: &HashSet<String>, command: &str) -> Vec<(String, i32)> {
-    // Find every path in the command.
-    let paths: Vec<&str> = command
-        .split(
-            |c: char| c != '/' && c != ':' && c != '-' && c != '_' && c != '.' &&
-                (c.is_whitespace() || c.is_ascii_punctuation())
+    // Divide into parts that make logical sense to a person to replace with a
+    // variable. Breaking up "words" doesn't make sense.
+    let parts = command.split(
+        |c: char|
+            c.is_whitespace()
+            || c == ';'
+            || c == '\''
+            || c == '"'
         )
-        .filter(|s| s.contains("/"))
-        .collect();
+        // Ignore the LHS of assignments.
+        .map(|part| part.split('=').last().unwrap())
+        .filter(|part| !part.is_empty());
 
     // Make a frequency table of all subpaths in each path.
     let mut frequency_table = std::collections::HashMap::new();
-    for path in paths {
-        let parts = path.split('/').collect::<Vec<_>>();
-        for i in 0..parts.len() {
-            for j in i..parts.len() {
-                let subpath = parts[i..j+1].join("/");
+    for part in parts {
+        //println!("part: {}", part);
+        let split_points = split_points(part);
+        //println!("split_points: {:?}", split_points);
+        for i in 0..split_points.len() {
+            for j in i+1..split_points.len() {
+                let subpath = &part[split_points[i]..split_points[j]];
+                //println!("subpath: {}", subpath);
                 let count = frequency_table.entry(subpath).or_insert(0);
                 *count += 1;
             }
@@ -92,11 +162,11 @@ fn build_savings_table(used: &HashSet<String>, command: &str) -> Vec<(String, i3
         if count < 2 {
             continue;
         }
-        let var_name = var_name(used, subpath.as_str());
+        let var_name = var_name(used, subpath);
         // Characters saved in the command by replacing this path.
-        // Account for the $ sign, but not { and }
-        let savings = (subpath.len() as i32 - var_name.len() as i32 - 1) * count;
-        savings_table.push((subpath, savings));
+        // Account for the $ sign as well as { and }
+        let savings = (subpath.len() as i32 - var_name.len() as i32 - 3) * count;
+        savings_table.push((subpath.to_string(), savings));
     }
     savings_table.sort_by(|a, b| b.1.cmp(&a.1));
     savings_table
